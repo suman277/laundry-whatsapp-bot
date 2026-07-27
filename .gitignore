@@ -1,0 +1,6 @@
+session.db
+__init*
+agent.cpython*
+agent_config.cpython*
+*cpython*
+.env
