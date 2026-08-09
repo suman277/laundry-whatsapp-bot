@@ -4,3 +4,6 @@ agent.cpython*
 agent_config.cpython*
 *cpython*
 .env
+ecorinse-db
+alembic.ini
+*mako

@@ -1,5 +1,11 @@
 from copy import deepcopy
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import json
+from ..database.db import get_session
+from ..routers.customer_router import create_order, get_customer_by_contact
+from ..schemas.common_schema import OrderSchemaRequestSchema
+from utils.common_utils import verify_geo_location
 from ..utils.agent_utils import get_response_from_llm
 from ..services.wa_services import send_whatsapp_message
 from ..session.session_manager import update_step, has_session, get_step, save_session, delete_session, get_data, print_sessions
@@ -7,22 +13,27 @@ from ..session.session_manager import update_step, has_session, get_step, save_s
 
 async def process_user_message(messages):
     print(messages)
-    # and messages[0].get("type") == "interactive"
+    name = None
+    contact_no = messages[0].get("from")
+    contact_id = str(contact_no)[2:]
+    async for session in get_session():
+        response = await get_customer_by_contact(contact_id, session)
+        name = response.get("name")
     if has_session(messages[0].get("from")):
-        payload, contact_no = handle_session_based_flow(messages[0])
+        payload, contact_no = await handle_session_based_flow(messages[0])
     elif messages[0].get("type") == "interactive":
-        contact_no, payload = handle_interactive_message(messages[0])
+        contact_no, payload = await handle_interactive_message(messages[0])
     else:
         contact_no = messages[0].get("from")
         session_id = contact_no
         message = messages[0].get("text", {}).get("body")
         response = await get_response_from_llm(message, contact_no, session_id)
         payload = get_message_template(
-            response=response, contact_no=contact_no)
+            response=response, contact_no=contact_no, name=name)
     await send_whatsapp_message(contact_no, payload)
 
 
-def get_message_template(response, contact_no):
+def get_message_template(response, contact_no, name):
     print("Raw LLM Response:")
     print(repr(response))
     response = response.replace("```json", "")
@@ -41,7 +52,8 @@ def get_message_template(response, contact_no):
             body = parts[1] if len(parts) > 1 else ""
             footer = parts[2] if len(parts) > 2 else ""
             payload = deepcopy(interactive_tempalte_for_first_message)
-            payload["interactive"]["header"]["text"] = header
+            payload["interactive"]["header"][
+                "text"] = f"Hello {name}! 👋 Welcome to Eco Rinse Laundry." if name is not None else header
             payload["interactive"]["body"]["text"] = (
                 f"{body}\n\n{footer}"
             )
@@ -59,19 +71,20 @@ def get_message_template(response, contact_no):
                 step="name_details"
             )
             return handle_name_details()
+        case "contact_details":
+            return contact_details()
         case "text":
-            return  {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "type": "text",
-        "text": {
-            "body": text
-        }
-    }
+            return {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "type": "text",
+                "text": {
+                    "body": text
+                }
+            }
 
 
-
-def handle_interactive_message(message):
+async def handle_interactive_message(message):
     print("Inside handle interactive messsage")
     print_sessions()
     contact_no = message.get("from")
@@ -83,6 +96,20 @@ def handle_interactive_message(message):
             return contact_no, service_template
 
         elif button_id == "schedule_pickup":
+            contact_id = str(contact_no)[2:]
+            async for session in get_session():
+                response = await get_customer_by_contact(contact_id, session)
+                print(response)
+                if response.get("name"):
+                    save_session(
+                        contact_no,
+                        flow="pickup",
+                        step="pickup_address",
+                        name=response.get("name"),
+                        phone_number=contact_id
+                    )
+                return contact_no, handle_user_address()
+
             save_session(
                 contact_no,
                 flow="pickup",
@@ -93,12 +120,12 @@ def handle_interactive_message(message):
             return contact_no, contact_details()
 
 
-def handle_session_based_flow(message):
+async def handle_session_based_flow(message):
     response = message.get("text", {}).get("body")
     contact_id = message.get("from")
     step = get_step(contact_id)
     if step == "name_details":
-        save_session(contact_id, name=response, contact_id=contact_id)
+        save_session(contact_id, name=response, phone_number=contact_id)
         update_step(contact_id, "pickup_address")
         return handle_user_address(), contact_id
     elif step == "pickup_address":
@@ -106,50 +133,80 @@ def handle_session_based_flow(message):
             return handle_user_address(), contact_id
 
         location = message["location"]
+        if verify_geo_location(location.get("longitude"), location.get("latitude")):
+            return service_unavilable(), contact_id
+        print(location)
         save_session(
             contact_id,
-            step="time_slot",
+            step="landmark",
             latitude=location.get("latitude"),
             longitude=location.get("longitude"),
-            address=location.get("address")
+            pickup_address=location.get("address")
         )
-        return handle_time_slot(), contact_id
-    # elif step == "time_slot":
-    #     if message.get("type") == "interactive":
-    #         button_id = message.get("interactive").get(
-    #             "button_reply").get("id")
-    #         save_session(
-    #             contact_id,
-    #             step="confirm_step",
-    #             time_slot=button_id
-    #         )
-    #         return handle_confirm_step(details["name"],details["time_slot"]), contact_id
+        return handle_landmark(), contact_id
+
+    elif step == "landmark":
+        save_session(
+            contact_id,
+            step="date_step",
+            landmark=response
+        )
+        return handle_date_slot(), contact_id
+
+    elif step == "date_step":
+        if message.get("type") == "interactive":
+            list_reply = message.get("interactive", {}).get("list_reply")
+            if not list_reply:
+                return contact_id, handle_date_slot()
+            date_slot = list_reply.get("title")
+            save_session(
+                contact_id,
+                step="time_slot",
+                pickup_date=date_slot
+            )
+            return handle_time(date_slot), contact_id
+
     elif step == "time_slot":
         if message.get("type") == "interactive":
             list_reply = message.get("interactive", {}).get("list_reply")
             if not list_reply:
-                return contact_id, handle_time_slot()
+                return date_slot(), contact_id
             time_slot = list_reply.get("title")
+            print("time", time_slot)
             save_session(
                 contact_id,
                 step="confirm_step",
-                time_slot=time_slot
+                pickup_time=time_slot
             )
-
             details = get_data(contact_id)
 
             return handle_confirm_step(
                 details["name"],
-                details["time_slot"]
+                details["pickup_date"]
             ), contact_id
     elif step == "confirm_step":
         if message.get("type") == "interactive":
             button_id = message.get("interactive").get(
                 "button_reply").get("id")
             details = get_data(contact_id)
+
+            details["pickup_date"] = datetime.strptime(
+                details["pickup_date"],
+                "%d-%m-%Y"
+            ).date()
+
+            details["pickup_time"] = datetime.strptime(
+                details["pickup_time"],
+                "%H:%M"
+            ).time()
+
+            payload = OrderSchemaRequestSchema(**details)
+            print(payload)
             if button_id == "confirm":
-                delete_session(contact_id)
-                return handle_confirm_message(), contact_id
+                async for session in get_session():
+                    response = await create_order(payload, session)
+                    delete_session(contact_id)
+                    return handle_confirm_message(), contact_id
             else:
                 delete_session(contact_id)
                 return handle_cancel_message(), contact_id
@@ -162,6 +219,18 @@ def handle_name_details():
         "type": "text",
         "text": {
             "body": "Enter Your Name"
+        }
+    }
+    return payload
+
+
+def handle_landmark():
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "type": "text",
+        "text": {
+            "body": "Please provide a landmark"
         }
     }
     return payload
@@ -187,6 +256,7 @@ def contact_details():
         }
     }
     return payload
+
 
 def handle_confirm_message():
     payload = {
@@ -249,7 +319,7 @@ def handle_confirm_step(name, time):
             "body": {
                 "text": (
                     f"Hi {name}! 👋\n\n"
-                    f"Your pickup is scheduled for {time} today.\n\n"
+                    f"Your pickup is scheduled for {time}.\n\n"
                     "Please use the buttons below to confirm or cancel your pickup."
                 )
             },
@@ -279,7 +349,34 @@ def handle_confirm_step(name, time):
     return payload
 
 
-def handle_time_slot():
+def handle_time(date_slot):
+    time_slots = []
+
+    store_opening = 11
+    store_closing = 20
+
+    ist = ZoneInfo("Asia/Kolkata")
+    now = datetime.now(ist)
+
+    selected_date = datetime.strptime(
+        date_slot, "%d-%m-%Y"
+    ).date()
+
+    today_date = now.date()
+
+    for hour in range(store_opening, store_closing):
+        if selected_date == today_date and hour <= now.hour:
+            continue
+
+        time_slots.append({
+            "id": f"{hour:02d}:00",
+            "title": f"{hour:02d}:00"
+        })
+
+    return handle_time_slot(time_slots)
+
+
+def handle_time_slot(time_slots):
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -301,49 +398,38 @@ def handle_time_slot():
                 "sections": [
                     {
                         "title": "Pick Up Time Slots",
-                        "rows": [
-                            {
-                                "id": "10-11",
-                                "title": "10 AM - 11AM",
-                                "description": "Your Product will picked in this time slot"
-                            },
-                            {
-                                "id": "11-12",
-                                "title": "11 AM - 11PM",
-                                "description": "Your Product will picked in this time slot"
-                            },
-                            {
-                                "id": "1-2",
-                                "title": "1 PM - 2 PM",
-                                "description": "Your Product will picked in this time slot"
-                            },
-                            {
-                                "id": "3-4",
-                                "title": "3 PM - 4 PM",
-                                "description": "Your Product will picked in this time slot"
-                            },
-                            {
-                                "id": "4-5",
-                                "title": "4 PM - 5 PM",
-                                "description": "Your Product will picked in this time slot"
-                            },
-                            {
-                                "id": "5-6",
-                                "title": "5 PM - 6 PM",
-                                "description": "Your Product will picked in this time slot"
-                            },
-                            {
-                                "id": "6-7",
-                                "title": "6 PM - 7 PM",
-                                "description": "Your Product will picked in this time slot"
-                            },
-                        ]
+                        "rows": time_slots
                     }
                 ]
             }
         },
     }
     return payload
+
+
+def handle_date_slot():
+    date_slots = []
+
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+
+    store_opening = 11
+    store_closing = 20
+
+    today = now.date()
+
+    for i in range(7):
+        current_date = today + timedelta(days=i)
+
+        if i == 0:
+            if not (store_opening <= now.hour < store_closing):
+                continue
+
+        date_slots.append({
+            "id": current_date.strftime("%d-%m-%Y"),
+            "title": current_date.strftime("%d-%m-%Y")
+        })
+
+    return handle_date_message(date_slots)
 
 
 interactive_tempalte_for_first_message = {
@@ -412,3 +498,48 @@ service_template = {
         }
     }
 }
+
+
+def service_unavilable():
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "type": "text",
+        "text": {
+            "body": (
+                "Oops ! Your area is not serviceable"
+            )
+        }
+    }
+    return payload
+
+
+def handle_date_message(date_slots: list):
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "header": {
+                "type": "text",
+                "text": "Select Date"
+            },
+            "body": {
+                "text": "Which Date do you prefer"
+            },
+            "footer": {
+                "text": "Based on Date, we are going to pick ✌🏻"
+            },
+            "action": {
+                "button": "Choose Your Date",
+                "sections": [
+                    {
+                        "title": "Pick Up Time Slots",
+                        "rows": date_slots
+                    }
+                ]
+            }
+        },
+    }
+    return payload

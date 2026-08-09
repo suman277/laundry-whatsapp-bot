@@ -1,0 +1,211 @@
+---
+kind : Namespace
+apiVersion : v1
+
+metadata:
+  name : my-app
+
+
+---
+kind : Pod
+apiVersion : v1
+
+metadata:
+  name : fastapi-pod
+  namespace : my-app
+  labels:
+    app : fastapi
+
+spec:
+  containers :
+    - name : fastapi
+      image : fastapi:latest
+      ports :
+        - containerPort : 8000
+      imagePullPolicy : Always
+
+---
+kind : Deployment
+apiVersion : apps/v1
+
+metadata :
+  name : fastapi-app
+  namespace : my-app
+  labels :
+    app : fastapi
+  
+spec :
+  replicas : 3
+  selector :
+    matchLabels :
+      app : fastapi
+  template :
+    metadata :
+      labels :
+        app : fastapi
+    
+    spec :
+      containers :
+        - name : fastapi
+          image : fastapi:latest
+          ports :
+            - containerPort : 8000
+          resources :
+            requests :
+              cpu : "100m"
+              memory  : "500Mi"
+            limits :
+              cpu : "500m"
+              memory : "1000Mi"
+          env :
+            - name : IS_LITE_LLM
+              valueFrom :
+                configMapKeyRef :
+                  name : backend-config
+                  key : IS_LITE_LLM
+          envFrom :
+            - configMapRef :
+                name : development-config
+          volumeMounts :
+            - name : postgres-svc-claim
+              mountPath : /var/lib/postgres/data
+      volumes :
+        - name : postgres-svc-claim
+          persistentVolumeClaim :
+            claimName : postgres-svc
+
+---
+kind : Service
+apiVersion : v1
+
+metadata :
+  name : fastapi-service
+  namespace : my-app
+
+spec:
+  selector :
+     app : fastapi
+  ports :
+    - port : 8000
+      targetPort : 8000
+  type : ClusterIP
+
+
+---
+kind : ConfigMap
+apiVersion : v1
+
+metadata :
+  name : backend-config
+  namespace : my-app
+
+data :
+  IS_LITE_LLM : "True"
+
+
+---
+kind : PersistentVolumeClaim
+apiVersion : v1
+
+metadata : 
+  name : postgres-svc
+  namespace : my-app
+
+spec :
+  accessModes :
+    - ReadWriteOnce
+  storageClassName : gp3
+  resources :
+    requests :
+      storage : "20Gi"
+
+---
+kind : Ingress
+apiVersion : networking.k8s.io/v1
+
+metadata :
+  name : fastapi-ingress
+  namespace : my-app
+
+spec :
+  rules :
+    - host : my-app.com
+      http:
+        paths :
+          - path : /
+            pathType : Prefix
+            backend :
+              service :
+                name : fastapi-service
+                port :
+                  number : 8000
+
+--- 
+kind : DaemonSet
+apiVersion : apps/v1
+
+metadata :
+  name : fluent-bit-daemon
+  namespace : my-app
+  labels :
+    app : fluent-bit
+
+spec :
+  selector :
+    matchLabels :
+      app : fluent-bit
+  template :
+    metadata :
+      labels :
+        app : fluent-bit
+    spec :
+      containers :
+        - name : fluent-bit-app
+          image : fluent-bit:latest
+          ports :
+            - containerPort : 7070
+          imagePullPolicy : Always
+
+---
+
+kind : StatefulSet
+apiVersion : apps/v1
+
+metadata :
+  name : mysql-app
+  namespace : my-app
+  labels :
+    app : mysql
+  
+spec :
+  serviceName: mysql
+  replicas : 3
+  selector :
+    matchLabels :
+      app : mysql
+  template :
+    metadata :
+      labels :
+        app : mysql
+    spec :
+      containers :
+        - name : mysql
+          image : mysql:latest
+          ports :
+            - containerPort : 3306
+          imagePullPolicy : Always
+          volumeMounts :
+            - name : postgres-svc
+              mountPath : /var/lib/postgres/data
+
+  volumeClaimTemplates:
+    - metadata : 
+        name : postgres-svc
+
+      spec :
+        accessModes :
+          - ReadWriteOnce
+        storageClassName : gp3
+        resources :
+          requests :
+            storage : "20Gi"

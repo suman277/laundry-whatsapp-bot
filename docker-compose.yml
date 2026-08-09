@@ -1,0 +1,15 @@
+services:
+  database:
+    container_name: ecorinse-db
+    image: postgres:17
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ECORINSE
+      POSTGRES_PASSWORD: EcoRinseLaundry1234
+      POSTGRES_DB: ecorinse
+      TZ: Asia/Kolkata
+      PGTZ: Asia/Kolkata
+    restart : always
+    volumes :
+      - ./ecorinse-db:/var/lib/postgresql/data

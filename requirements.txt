@@ -5,3 +5,8 @@ python-dotenv
 litellm
 httpx
 dotenv
+sqlmodel
+asyncpg
+alembic
+greenlet
+geopy
